@@ -1,77 +1,36 @@
-# Vulnerability Scanner & Auto-Patcher
+# Vulnerability Scanner
 
-Scans a GitHub repo for security vulnerabilities using distributed Claude-powered agents on [Tensorlake](https://docs.tensorlake.ai), then generates patches for confirmed findings.
+Scans a GitHub repo for SQLi, XSS, SSRF, and auth-bypass vulnerabilities using parallel Claude detectors. Triages false positives, generates patches, and validates each patch against the project's real test suite.
 
-## Quick Start
-
-### Prerequisites
-
-- Python 3.10+
-- An [Anthropic API key](https://console.anthropic.com/)
-- A [Tensorlake account](https://cloud.tensorlake.ai)
-
-### 1. Install dependencies
+## Setup
 
 ```bash
-pip install tensorlake anthropic pydantic requests
+./setup.sh
 ```
 
-### 2. Set up credentials
+Then put your `ANTHROPIC_API_KEY` in `.env`.
 
-```bash
-export ANTHROPIC_API_KEY=<your-anthropic-key>
-
-# Either login interactively or set the API key
-tensorlake login
-# or
-export TENSORLAKE_API_KEY=<your-key>
-```
-
-### 3. Run
+## Run
 
 ```bash
 python vuln_scanner.py
 ```
 
-You'll be prompted for the max number of files to scan (default: 10).
+Defaults to OWASP/NodeGoat. Press enter through the prompts to use defaults.
 
-### Deploy to Tensorlake
+## How it works
 
-```bash
-tensorlake secrets set ANTHROPIC_API_KEY <your-anthropic-key>
-tensorlake deploy vuln_scanner.py
+The agent runs locally and drives Claude through detect → triage → patch, but every operation that touches untrusted code — cloning the repo, installing `npm`/`pip` dependencies, applying patches, running the project's real test suite — happens inside a [Tensorlake](https://cloud.tensorlake.ai/) sandbox. Tensorlake gives us a disposable VM built once from a declarative `Image` (`ubuntu-systemd` + `git`/`node`/`npm`/`python3`/`pytest`), per-scan isolation with explicit CPU/memory/disk/timeout budgets, and a simple `run` / `read_file` / `write_file` API so the local driver can manipulate the workspace without SSH or Docker plumbing.
 
-curl https://api.tensorlake.ai/applications/scan_and_patch \
-  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
-  --json '{"repo_url": "https://github.com/juice-shop/juice-shop", "branch": "main", "max_files": 20}'
-```
+1. Clones the target repo into the sandbox.
+2. For each source file, runs 4 specialist Claude detectors in parallel.
+3. A triage agent classifies findings as `confirmed` / `likely` / `false_positive`.
+4. Generates a patch for each surviving finding.
+5. Applies each patch in the sandbox, runs `npm test` / `pytest`, reverts.
+6. Reports pass/fail per patch.
 
-## Architecture
+## Requirements
 
-```
-scan_and_patch (entry point)
-│
-├─► fetch_repo_files                    Fetches source files from GitHub
-│
-├─► detect_vulnerabilities.map(files)   MAP across all files
-│     │
-│     └─► Per file, 4 parallel detectors:
-│           ├─ sqli_detector            SQL Injection (CWE-89)
-│           ├─ xss_detector             Cross-Site Scripting (CWE-79)
-│           ├─ ssrf_detector            SSRF (CWE-918)
-│           └─ auth_detector            Auth Bypass (CWE-287/862)
-│
-├─► aggregate_findings.reduce(...)      REDUCE: merge per-file results
-│
-├─► triage_findings                     Adversarial reviewer rejects false positives
-│
-├─► generate_single_patch.map(vulns)    MAP: generate patches in isolated sandboxes
-│
-└─► compile_report                      Final structured output
-```
-
-## How It Works
-
-Each `@function()` runs in its own isolated container. For every source file, 4 specialist detectors launch in parallel via `.future()`. `.map()` fans scanning across all files, and `.reduce()` aggregates the results. A triage agent then reviews findings adversarially to reject false positives before patches are generated.
-
-For a repo with 50 source files, this spawns **50 x 4 = 200 parallel detector containers**. Without Tensorlake that's ~100 minutes of sequential LLM calls — with it, ~30 seconds.
+- Python 3.10+
+- [Tensorlake account](https://cloud.tensorlake.ai/)
+- [Anthropic API key](https://console.anthropic.com/)
